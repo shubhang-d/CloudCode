@@ -17,7 +17,30 @@
         "command": "cloudcode.helloWorld",
         "title": "Hello World"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "cloudcode-sidebar",
+          "title": "CloudCode",
+          "icon": "images/cloudcode-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "cloudcode-sidebar": [
+        {
+          "id": "cloudcode.projectsView",
+          "name": "Project Analysis",
+          "contextualTitle": "CloudCode"
+        },
+        {
+          "id": "cloudcode.refactorActionsView",
+          "name": "Refactor Actions",
+          "contextualTitle": "CloudCode"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
