@@ -1,63 +1,86 @@
 import * as vscode from 'vscode';
 
+// We can keep the InfoItem class as is, it's perfectly reusable.
 export class InfoItem extends vscode.TreeItem {
     constructor(
         public readonly label: string,
         public readonly collapsibleState: vscode.TreeItemCollapsibleState,
-        public readonly contextValue?: string // Used to identify the type of item
+        // We add an optional description to show values on the same line
+        public readonly description?: string
     ) {
         super(label, collapsibleState);
     }
 }
 
 export class ProjectAnalysisProvider implements vscode.TreeDataProvider<InfoItem> {
-
-    // An event emitter that fires when the tree data changes.
-    // VS Code listens to this to know when to refresh the view.
     private _onDidChangeTreeData: vscode.EventEmitter<InfoItem | undefined | null | void> = new vscode.EventEmitter<InfoItem | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<InfoItem | undefined | null | void> = this._onDidChangeTreeData.event;
 
-    // A private property to hold the metadata from our backend
     private analysisData: any = null;
 
-    // This method is called by VS Code to get the root items or children of an element.
     getChildren(element?: InfoItem): vscode.ProviderResult<InfoItem[]> {
         if (!this.analysisData) {
             return Promise.resolve([new InfoItem("Analyze a project to see details", vscode.TreeItemCollapsibleState.None)]);
         }
 
-        if (element) {
-            switch (element.label) {
-                case 'Identification':
-                    return Promise.resolve([
-                        new InfoItem(`Total Files: ${this.analysisData.identification.totalFiles}`, vscode.TreeItemCollapsibleState.None),
-                        new InfoItem(`Lines of Code: ${this.analysisData.identification.totalLinesOfCode}`, vscode.TreeItemCollapsibleState.None),
-                        new InfoItem('Languages', vscode.TreeItemCollapsibleState.Collapsed)
-                    ]);
-                case 'Languages':
-                    // Map the language data from the backend to TreeItems
-                    const langBreakdown = this.analysisData.identification.languageBreakdown;
-                    return Promise.resolve(Object.keys(langBreakdown).map(lang =>
-                        new InfoItem(`${lang}: ${langBreakdown[lang].code} lines`, vscode.TreeItemCollapsibleState.None)
-                    ));
-                case 'Activity':
-                    return Promise.resolve([
-                        new InfoItem(`Total Commits: ${this.analysisData.activity.totalCommits}`, vscode.TreeItemCollapsibleState.None),
-                        new InfoItem(`Contributors: ${this.analysisData.activity.contributorCount}`, vscode.TreeItemCollapsibleState.None)
-                    ]);
-                case 'Quality Health':
-                     return Promise.resolve([
-                        new InfoItem(`Technical Debt: ${this.analysisData.qualityHealth.technicalDebtRatio}`, vscode.TreeItemCollapsibleState.None)
-                    ]);
-                default:
-                    return Promise.resolve([]);
-            }
-        } else {
+        // Root level items
+        if (!element) {
             return Promise.resolve([
-                new InfoItem('Identification', vscode.TreeItemCollapsibleState.Collapsed),
-                new InfoItem('Activity', vscode.TreeItemCollapsibleState.Collapsed),
-                new InfoItem('Quality Health', vscode.TreeItemCollapsibleState.Collapsed)
+                new InfoItem('Project Info', vscode.TreeItemCollapsibleState.Expanded),
+                new InfoItem('Identification', vscode.TreeItemCollapsibleState.Expanded),
+                new InfoItem('Activity', vscode.TreeItemCollapsibleState.Expanded),
+                new InfoItem('Quality Health (Placeholders)', vscode.TreeItemCollapsibleState.Expanded)
             ]);
+        }
+
+        // Child level items
+        switch (element.label) {
+            case 'Project Info':
+                return Promise.resolve([
+                    new InfoItem('Name', vscode.TreeItemCollapsibleState.None, this.analysisData.projectName),
+                    new InfoItem('URL', vscode.TreeItemCollapsibleState.None, this.analysisData.repositoryUrl),
+                    new InfoItem('Last Analysis', vscode.TreeItemCollapsibleState.None, new Date(this.analysisData.lastAnalysisDate).toLocaleString())
+                ]);
+
+            case 'Identification':
+                return Promise.resolve([
+                    new InfoItem('Total Files', vscode.TreeItemCollapsibleState.None, this.analysisData.identification.totalFiles.toString()),
+                    new InfoItem('Lines of Code', vscode.TreeItemCollapsibleState.None, this.analysisData.identification.totalLinesOfCode.toString()),
+                    new InfoItem('Dependencies', vscode.TreeItemCollapsibleState.None, this.analysisData.identification.dependencyCount.toString()),
+                    new InfoItem('Languages', vscode.TreeItemCollapsibleState.Collapsed)
+                ]);
+            
+            case 'Languages':
+                const langBreakdown = this.analysisData.identification.languageBreakdown;
+                return Promise.resolve(Object.keys(langBreakdown).map(lang =>
+                    new InfoItem(lang, vscode.TreeItemCollapsibleState.None, `${langBreakdown[lang].code} lines`)
+                ));
+
+            case 'Activity':
+                return Promise.resolve([
+                    new InfoItem('Last Commit', vscode.TreeItemCollapsibleState.None, new Date(this.analysisData.activity.lastCommitDate).toLocaleString()),
+                    new InfoItem('Total Commits', vscode.TreeItemCollapsibleState.None, this.analysisData.activity.totalCommits.toString()),
+                    new InfoItem('Contributors', vscode.TreeItemCollapsibleState.None, this.analysisData.activity.contributorCount.toString()),
+                    new InfoItem('Commit Frequency', vscode.TreeItemCollapsibleState.None, `${this.analysisData.activity.commitFrequency} commits/month`),
+                    new InfoItem('Active Branches', vscode.TreeItemCollapsibleState.None, this.analysisData.activity.activeBranches.toString())
+                ]);
+            
+            case 'Quality Health (Placeholders)':
+                return Promise.resolve([
+                    new InfoItem('Code Coverage', vscode.TreeItemCollapsibleState.None, this.analysisData.qualityHealth.codeCoverage),
+                    new InfoItem('Technical Debt Ratio', vscode.TreeItemCollapsibleState.None, this.analysisData.qualityHealth.technicalDebtRatio),
+                    new InfoItem('Cyclomatic Complexity', vscode.TreeItemCollapsibleState.None, this.analysisData.qualityHealth.cyclomaticComplexity),
+                    new InfoItem('Duplicated Lines', vscode.TreeItemCollapsibleState.None, this.analysisData.qualityHealth.duplicatedLines),
+                    new InfoItem('Code Issues', vscode.TreeItemCollapsibleState.Collapsed)
+                ]);
+
+            case 'Code Issues':
+                const issues = this.analysisData.qualityHealth.codeIssues;
+                return Promise.resolve([
+                    new InfoItem('Critical', vscode.TreeItemCollapsibleState.None, issues.critical.toString()),
+                    new InfoItem('Major', vscode.TreeItemCollapsibleState.None, issues.major.toString()),
+                    new InfoItem('Minor', vscode.TreeItemCollapsibleState.None, issues.minor.toString())
+                ]);
         }
     }
 
