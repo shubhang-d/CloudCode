@@ -19,7 +19,7 @@
       },
       {
         "command": "cloudcode.analyzeProject",
-        "title": "CloudCode: Analyze a Public Git Repository"
+        "title": "CloudCode: Analyze Current Project"
       }
     ],
     "viewsContainers": {
