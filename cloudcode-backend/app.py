@@ -2,111 +2,123 @@ import os
 import subprocess
 import tempfile
 import json
+import re
+from datetime import datetime
 from flask import Flask, request, jsonify
 
-# Initialize the Flask application
 app = Flask(__name__)
 
 def run_command(command, working_dir):
-    """A helper function to run a command in a specific directory and return its output."""
+    """Helper function to run a command and return its output. Returns an empty string on failure."""
     try:
-        # Runs the command, captures stdout/stderr, and raises an error if the command fails.
         result = subprocess.run(
-            command,
-            cwd=working_dir,
-            check=True,
-            capture_output=True,
-            text=True  # Ensure output is decoded as text
+            command, cwd=working_dir, check=True, capture_output=True, text=True, encoding='utf-8', errors='ignore'
         )
         return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        # If the command returns a non-zero exit code, it's an error
-        print(f"Error running command: {' '.join(command)}")
-        print(f"Stderr: {e.stderr.strip()}")
-        # We re-raise the exception to be caught by the main endpoint handler
-        raise e
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"Warning: Command '{' '.join(command)}' failed. Stderr: {getattr(e, 'stderr', 'Command not found.')}")
+        return "" # Return empty string on failure so downstream code can handle it
+
+def get_dependency_count(repo_dir):
+    """Safely parses common dependency files to count dependencies."""
+    count = 0
+    try:
+        with open(os.path.join(repo_dir, 'package.json'), 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            count += len(data.get('dependencies', {}))
+            count += len(data.get('devDependencies', {}))
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    try:
+        with open(os.path.join(repo_dir, 'requirements.txt'), 'r', encoding='utf-8') as f:
+            lines = [line for line in f if line.strip() and not line.strip().startswith('#')]
+            count += len(lines)
     except FileNotFoundError:
-        # This happens if a command (like 'cloc' or 'git') is not installed
-        print(f"Error: Command '{command[0]}' not found. Is it installed and in your PATH?")
-        raise
+        pass
+    return count
 
 @app.route('/analyze', methods=['POST'])
 def analyze_project():
-    """
-    The main API endpoint. Expects a JSON payload with a 'repositoryUrl'.
-    Clones the repo into a temporary directory, runs analysis, and returns JSON metadata.
-    """
     data = request.get_json()
     if not data or 'repositoryUrl' not in data:
         return jsonify({"error": "Missing 'repositoryUrl' in request body"}), 400
 
     repo_url = data['repositoryUrl']
 
-    # Use a temporary directory that is automatically cleaned up when we're done
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
             print(f"Cloning {repo_url} into {temp_dir}...")
-            # 1. CLONE THE REPOSITORY
-            run_command(['git', 'clone', repo_url, '.'], temp_dir)
+            # We check the initial clone command for failure separately.
+            subprocess.run(['git', 'clone', repo_url, '.'], cwd=temp_dir, check=True, capture_output=True)
             print("Clone successful.")
 
-            # --- GATHER METADATA USING COMMAND-LINE TOOLS ---
+            # --- Safely gather all metrics ---
+            last_commit_date = run_command(['git', 'log', '-1', '--format=%cd'], temp_dir) or "N/A"
+            total_commits_str = run_command(['git', 'rev-list', '--all', '--count'], temp_dir)
+            total_commits = int(total_commits_str) if total_commits_str.isdigit() else 0
 
-            # 2. GET COMMIT COUNT
-            commit_count_str = run_command(['git', 'rev-list', '--all', '--count'], temp_dir)
-            commit_count = int(commit_count_str)
-            print(f"Found {commit_count} commits.")
+            contributors_raw = run_command(['git', 'shortlog', '-s', '-n', '--all'], temp_dir)
+            contributor_count = len(contributors_raw.splitlines()) if contributors_raw else 0
 
-            # 3. GET CONTRIBUTOR COUNT
-            contributor_count_str = run_command(['git', 'shortlog', '-s', '-n', '--all'], temp_dir)
-            # Each line is a contributor, so we count the lines
-            contributor_count = len(contributor_count_str.splitlines())
-            print(f"Found {contributor_count} contributors.")
+            active_branches_raw = run_command(['git', 'branch', '-r', '--no-merged'], temp_dir)
+            active_branches = len(active_branches_raw.splitlines()) if active_branches_raw else 0
 
-            # 4. RUN CLOC FOR LANGUAGE BREAKDOWN AND FILE COUNTS
-            # The --json flag is amazing, it gives us structured data directly
+            # Safely calculate commit frequency
+            commit_frequency = 0
+            first_commit_ts_str = run_command(['git', 'rev-list', '--max-parents=0', 'HEAD', '--format=%ct'], temp_dir)
+            last_commit_ts_str = run_command(['git', 'log', '-1', '--format=%ct'], temp_dir)
+
+            if first_commit_ts_str and last_commit_ts_str:
+                first_commit_unix_ts = int(first_commit_ts_str.splitlines()[-1])
+                last_commit_unix_ts = int(last_commit_ts_str)
+                project_age_seconds = last_commit_unix_ts - first_commit_unix_ts
+                if project_age_seconds > 0:
+                    project_age_months = project_age_seconds / (86400 * 30.44)
+                    commit_frequency = total_commits / project_age_months if project_age_months > 0 else 0
+
+            # CLOC Analysis
             cloc_output_json = run_command(['cloc', '--json', '.'], temp_dir)
-            cloc_data = json.loads(cloc_output_json)
-            print("cloc analysis successful.")
-
-            # --- ASSEMBLE THE FINAL METADATA OBJECT ---
-            # We remove the 'header' from cloc data as it's not needed
+            cloc_data = json.loads(cloc_output_json) if cloc_output_json else {}
             cloc_data.pop('header', None)
-            
-            # The 'SUM' key from cloc gives us totals for files and lines of code
             summary = cloc_data.pop('SUM', {})
 
+            # Dependency Count
+            dependency_count = get_dependency_count(temp_dir)
+            
+            # Assemble the final metadata object
             metadata = {
                 "projectName": repo_url.split('/')[-1].replace('.git', ''),
                 "repositoryUrl": repo_url,
+                "lastAnalysisDate": datetime.now().isoformat(),
                 "identification": {
                     "languageBreakdown": cloc_data,
                     "totalFiles": summary.get('nFiles', 0),
                     "totalLinesOfCode": summary.get('code', 0),
-                    "totalCommentLines": summary.get('comment', 0),
-                    "totalBlankLines": summary.get('blank', 0),
+                    "dependencyCount": dependency_count
                 },
                 "activity": {
-                    "totalCommits": commit_count,
+                    "lastCommitDate": last_commit_date,
+                    "totalCommits": total_commits,
                     "contributorCount": contributor_count,
+                    "commitFrequency": round(commit_frequency, 2),
+                    "activeBranches": active_branches,
                 },
-                # Placeholder for future quality metrics
                 "qualityHealth": {
-                    "technicalDebtRatio": "N/A",
-                    "codeIssues": {},
+                    "technicalDebtRatio": "N/A", "codeIssues": {"critical": "N/A", "major": "N/A", "minor": "N/A"},
+                    "codeCoverage": "N/A", "cyclomaticComplexity": "N/A", "duplicatedLines": "N/A"
                 }
             }
 
             return jsonify(metadata), 200
 
-        except subprocess.CalledProcessError:
-            return jsonify({"error": "Failed to analyze repository. Check if the URL is correct and public."}), 500
-        except FileNotFoundError:
-            return jsonify({"error": "A required command-line tool (like git or cloc) is not installed on the server."}), 500
+        except subprocess.CalledProcessError as e:
+            # This will now catch the initial git clone failure
+            return jsonify({"error": f"Failed to clone repository. Is the URL correct and public? Details: {e.stderr.strip()}"}), 500
         except Exception as e:
-            print(f"An unexpected error occurred: {e}")
-            return jsonify({"error": "An internal server error occurred."}), 500
+            # This is a catch-all for any other unexpected error during analysis
+            error_message = f"An unexpected error occurred on the backend: {str(e)}"
+            print(error_message) # Print to backend console for debugging
+            return jsonify({"error": error_message}), 500
 
 if __name__ == '__main__':
-    # Runs the app in debug mode for development
     app.run(debug=True, port=5000)
