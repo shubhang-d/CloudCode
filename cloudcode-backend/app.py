@@ -6,39 +6,38 @@ import tempfile
 import json
 from datetime import datetime
 from flask import Flask, request, jsonify
+import sys
 
-# --- NEW: Import radon for code analysis ---
+# Import radon for code analysis
 from radon.metrics import mi_visit
+from radon.visitors import ComplexityVisitor
 from radon.cli.tools import iter_filenames
 
 app = Flask(__name__)
 
-def run_command(command, working_dir):
+def run_command(command, working_dir, check=True):
     """
     Runs a shell command in a specified directory and returns its output.
-    Returns None if the command fails.
+    Returns None if the command fails and check is True.
     """
     try:
         result = subprocess.run(
-            command, 
-            cwd=working_dir, 
-            check=True, 
-            capture_output=True, 
-            text=True, 
+            command,
+            cwd=working_dir,
+            check=check,
+            capture_output=True,
+            text=True,
             encoding='utf-8'
         )
         return result.stdout.strip()
     except Exception as e:
-        # Log the error but don't crash the server
         print(f"Error running command: {' '.join(command)}. Error: {e}")
-        return None # Return None on error to handle it gracefully
+        return None
 
 def get_dependency_count(repo_dir):
-    """
-    Counts dependencies from common package manager files.
-    """
+    """Counts dependencies from common package manager files."""
+    # (This function is unchanged)
     count = 0
-    # Node.js
     try:
         with open(os.path.join(repo_dir, 'package.json'), 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -46,7 +45,6 @@ def get_dependency_count(repo_dir):
             count += len(data.get('devDependencies', {}))
     except (FileNotFoundError, json.JSONDecodeError):
         pass
-    # Python
     try:
         with open(os.path.join(repo_dir, 'requirements.txt'), 'r', encoding='utf-8') as f:
             count += len([line for line in f if line.strip() and not line.strip().startswith('#')])
@@ -55,43 +53,95 @@ def get_dependency_count(repo_dir):
     return count
 
 def calculate_technical_debt_ratio(repo_dir):
-    """
-    Analyzes supported source files in a directory to calculate a technical debt ratio
-    based on the average Maintainability Index (MI).
-    A higher MI (0-100) is better. Our ratio is 100 - average_mi.
-    """
+    """Calculates a technical debt ratio based on the average Maintainability Index."""
+    # (This function is unchanged)
     total_mi_score = 0
     file_count = 0
-    
-    # Use radon's file finder to get relevant source files (py, js, ts, etc.).
-    # Exclude common non-source directories to speed up the process.
     exclude_patterns = "*/node_modules/*,*/venv/*,*/.git/*,*/dist/*,*/build/*"
-    # iter_filenames takes a list of paths to scan.
     supported_files = list(iter_filenames([repo_dir], exclude=exclude_patterns))
-
     for filepath in supported_files:
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 code = f.read()
-                # Calculate Maintainability Index for the file's content.
-                # A higher MI is better (more maintainable).
                 mi = mi_visit(code, multi=True)
-                if mi > 0: # Only include files that could be parsed
+                if mi > 0:
                     total_mi_score += mi
                     file_count += 1
-        except Exception:
-            # Silently ignore files that can't be opened or parsed
-            # (e.g., binary files, unsupported encodings)
-            pass
-
-    if file_count == 0:
-        return "N/A"
-
+        except Exception: pass
+    if file_count == 0: return "N/A"
     average_mi = total_mi_score / file_count
-    # Our "debt ratio" is 100 minus the average maintainability.
-    # A lower maintainability score results in a higher debt ratio.
     debt_ratio = 100 - average_mi
     return f"{debt_ratio:.2f}%"
+
+def calculate_average_complexity(repo_dir):
+    """Calculates the average Cyclomatic Complexity per function/method."""
+    # (This function is unchanged)
+    total_complexity, function_count = 0, 0
+    exclude_patterns = "*/node_modules/*,*/venv/*,*/.git/*,*/dist/*,*/build/*"
+    supported_files = list(iter_filenames([repo_dir], exclude=exclude_patterns))
+    for filepath in supported_files:
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                code = f.read()
+                visitor = ComplexityVisitor.from_code(code)
+                for function in visitor.functions:
+                    total_complexity += function.complexity
+                    function_count += 1
+        except Exception: pass
+    if function_count == 0: return "N/A"
+    average_complexity = total_complexity / function_count
+    return f"{average_complexity:.2f}"
+
+# --- NEW FUNCTION TO SCAN FOR VULNERABILITIES (PART 3) ---
+def analyze_vulnerabilities(repo_dir):
+    """
+    Scans for vulnerabilities in package.json and requirements.txt and
+    returns a dictionary of issue counts by severity.
+    """
+    issues = {"critical": 0, "major": 0, "minor": 0}
+
+    # --- Scan Node.js dependencies ---
+    if os.path.exists(os.path.join(repo_dir, 'package.json')):
+        print("Found package.json, running npm audit...")
+        # Install dependencies first, but don't fail the whole analysis if it breaks
+        run_command(['npm', 'install', '--omit=dev', '--legacy-peer-deps'], repo_dir, check=False)
+        # Run audit, allow it to fail (returns non-zero exit code if vulns are found)
+        audit_output = run_command(['npm', 'audit', '--json'], repo_dir, check=False)
+        if audit_output:
+            try:
+                audit_data = json.loads(audit_output)
+                summary = audit_data.get('summary', {})
+                issues['critical'] += summary.get('critical', 0)
+                issues['major'] += summary.get('high', 0) # Mapping 'high' from npm to 'major'
+                issues['minor'] += summary.get('moderate', 0) + summary.get('low', 0)
+            except json.JSONDecodeError:
+                print("Could not parse npm audit JSON output.")
+
+    # --- Scan Python dependencies ---
+    if os.path.exists(os.path.join(repo_dir, 'requirements.txt')):
+        print("Found requirements.txt, running safety check...")
+        # Create a temporary virtual environment to not pollute the main one
+        temp_venv_path = os.path.join(repo_dir, "temp_venv_for_scan")
+        python_executable = sys.executable
+        run_command([python_executable, '-m', 'venv', temp_venv_path], repo_dir)
+        
+        pip_path = os.path.join(temp_venv_path, 'bin', 'pip')
+        safety_path = os.path.join(temp_venv_path, 'bin', 'safety')
+
+        # Install dependencies into the temporary venv
+        run_command([pip_path, 'install', '-r', 'requirements.txt'], repo_dir, check=False)
+        # Run safety check
+        safety_output = run_command([safety_path, 'check', '--json'], repo_dir, check=False)
+        if safety_output:
+            try:
+                safety_data = json.loads(safety_output)
+                # For simplicity, we'll classify all Python vulns as 'major' for now
+                issues['major'] += len(safety_data)
+            except json.JSONDecodeError:
+                print("Could not parse safety check JSON output.")
+
+    return issues
+
 
 @app.route('/analyze', methods=['POST'])
 def analyze_project():
@@ -101,67 +151,50 @@ def analyze_project():
 
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
-            # We add a depth limit to speed up cloning for large repositories
             run_command(['git', 'clone', '--depth=100', repo_url, '.'], temp_dir)
             
-            # --- TIER 1 & 3: ACTIVITY METRICS ---
+            # (Git and cloc metrics gathering remains the same)
             last_commit_date = run_command(['git', 'log', '-1', '--format=%cd'], temp_dir)
-            
             total_commits_str = run_command(['git', 'rev-list', '--all', '--count'], temp_dir)
             total_commits = int(total_commits_str) if total_commits_str else 0
-            
+            # ... (other git commands are the same) ...
             contributor_count_str = run_command(['git', 'shortlog', '-s', '-n', '--all'], temp_dir)
             contributor_count = len(contributor_count_str.splitlines()) if contributor_count_str else 0
-
             active_branches_str = run_command(['git', 'branch', '-r'], temp_dir)
             active_branches = len(active_branches_str.splitlines()) if active_branches_str else 0
             
-            # Calculate commit frequency
             first_commit_unix_ts_str = run_command(['git', 'rev-list', '--max-parents=0', 'HEAD', '--format=%ct'], temp_dir)
             last_commit_unix_ts_str = run_command(['git', 'log', '-1', '--format=%ct'], temp_dir)
-
             commit_frequency = 0
             if first_commit_unix_ts_str and last_commit_unix_ts_str:
                 first_commit_unix_ts = int(first_commit_unix_ts_str.splitlines()[-1])
                 last_commit_unix_ts = int(last_commit_unix_ts_str)
                 project_age_seconds = last_commit_unix_ts - first_commit_unix_ts
-                # Avoid division by zero for very new projects
                 if project_age_seconds > 0:
                     project_age_months = project_age_seconds / (86400 * 30.44)
                     commit_frequency = total_commits / project_age_months if project_age_months > 0 else 0
 
-            # --- IDENTIFICATION METRICS (cloc) ---
             cloc_output_str = run_command(['cloc', '--json', '.'], temp_dir)
             cloc_output = json.loads(cloc_output_str) if cloc_output_str else {}
             cloc_output.pop('header', None)
             summary = cloc_output.pop('SUM', {})
-            
-            # --- NEW: Call the technical debt function ---
+
+            # --- Call all quality health functions ---
             tech_debt_ratio = calculate_technical_debt_ratio(temp_dir)
-            
+            avg_complexity = calculate_average_complexity(temp_dir)
+            code_issues = analyze_vulnerabilities(temp_dir) # <-- NEW CALL
+
             # --- ASSEMBLE FINAL METADATA OBJECT ---
             metadata = {
                 "projectName": repo_url.split('/')[-1].replace('.git', ''),
-                "repositoryUrl": repo_url,
-                "lastAnalysisDate": datetime.now().isoformat(),
-                "identification": {
-                    "languageBreakdown": cloc_output,
-                    "totalFiles": summary.get('nFiles', 0),
-                    "totalLinesOfCode": summary.get('code', 0),
-                    "dependencyCount": get_dependency_count(temp_dir)
-                },
-                "activity": {
-                    "lastCommitDate": last_commit_date,
-                    "totalCommits": total_commits,
-                    "contributorCount": contributor_count,
-                    "commitFrequency": round(commit_frequency, 2),
-                    "activeBranches": active_branches
-                },
+                "repositoryUrl": repo_url, "lastAnalysisDate": datetime.now().isoformat(),
+                "identification": {"languageBreakdown": cloc_output, "totalFiles": summary.get('nFiles', 0), "totalLinesOfCode": summary.get('code', 0), "dependencyCount": get_dependency_count(temp_dir)},
+                "activity": {"lastCommitDate": last_commit_date, "totalCommits": total_commits, "contributorCount": contributor_count, "commitFrequency": round(commit_frequency, 2), "activeBranches": active_branches},
                 "qualityHealth": {
-                    "technicalDebtRatio": tech_debt_ratio, # <-- UPDATED VALUE
-                    "codeIssues": {"critical": "N/A", "major": "N/A", "minor": "N/A"},
+                    "technicalDebtRatio": tech_debt_ratio,
+                    "codeIssues": code_issues, # <-- UPDATED VALUE
                     "codeCoverage": "N/A",
-                    "cyclomaticComplexity": "N/A",
+                    "cyclomaticComplexity": avg_complexity,
                     "duplicatedLines": "N/A"
                 }
             }
