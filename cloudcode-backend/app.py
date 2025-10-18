@@ -1,112 +1,176 @@
+# cloudcode-backend/app.py
+
 import os
 import subprocess
 import tempfile
 import json
+from datetime import datetime
 from flask import Flask, request, jsonify
 
-# Initialize the Flask application
+# --- NEW: Import radon for code analysis ---
+from radon.metrics import mi_visit
+from radon.cli.tools import iter_filenames
+
 app = Flask(__name__)
 
 def run_command(command, working_dir):
-    """A helper function to run a command in a specific directory and return its output."""
+    """
+    Runs a shell command in a specified directory and returns its output.
+    Returns None if the command fails.
+    """
     try:
-        # Runs the command, captures stdout/stderr, and raises an error if the command fails.
         result = subprocess.run(
-            command,
-            cwd=working_dir,
-            check=True,
-            capture_output=True,
-            text=True  # Ensure output is decoded as text
+            command, 
+            cwd=working_dir, 
+            check=True, 
+            capture_output=True, 
+            text=True, 
+            encoding='utf-8'
         )
         return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        # If the command returns a non-zero exit code, it's an error
-        print(f"Error running command: {' '.join(command)}")
-        print(f"Stderr: {e.stderr.strip()}")
-        # We re-raise the exception to be caught by the main endpoint handler
-        raise e
+    except Exception as e:
+        # Log the error but don't crash the server
+        print(f"Error running command: {' '.join(command)}. Error: {e}")
+        return None # Return None on error to handle it gracefully
+
+def get_dependency_count(repo_dir):
+    """
+    Counts dependencies from common package manager files.
+    """
+    count = 0
+    # Node.js
+    try:
+        with open(os.path.join(repo_dir, 'package.json'), 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            count += len(data.get('dependencies', {}))
+            count += len(data.get('devDependencies', {}))
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    # Python
+    try:
+        with open(os.path.join(repo_dir, 'requirements.txt'), 'r', encoding='utf-8') as f:
+            count += len([line for line in f if line.strip() and not line.strip().startswith('#')])
     except FileNotFoundError:
-        # This happens if a command (like 'cloc' or 'git') is not installed
-        print(f"Error: Command '{command[0]}' not found. Is it installed and in your PATH?")
-        raise
+        pass
+    return count
+
+def calculate_technical_debt_ratio(repo_dir):
+    """
+    Analyzes supported source files in a directory to calculate a technical debt ratio
+    based on the average Maintainability Index (MI).
+    A higher MI (0-100) is better. Our ratio is 100 - average_mi.
+    """
+    total_mi_score = 0
+    file_count = 0
+    
+    # Use radon's file finder to get relevant source files (py, js, ts, etc.).
+    # Exclude common non-source directories to speed up the process.
+    exclude_patterns = "*/node_modules/*,*/venv/*,*/.git/*,*/dist/*,*/build/*"
+    # iter_filenames takes a list of paths to scan.
+    supported_files = list(iter_filenames([repo_dir], exclude=exclude_patterns))
+
+    for filepath in supported_files:
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                code = f.read()
+                # Calculate Maintainability Index for the file's content.
+                # A higher MI is better (more maintainable).
+                mi = mi_visit(code, multi=True)
+                if mi > 0: # Only include files that could be parsed
+                    total_mi_score += mi
+                    file_count += 1
+        except Exception:
+            # Silently ignore files that can't be opened or parsed
+            # (e.g., binary files, unsupported encodings)
+            pass
+
+    if file_count == 0:
+        return "N/A"
+
+    average_mi = total_mi_score / file_count
+    # Our "debt ratio" is 100 minus the average maintainability.
+    # A lower maintainability score results in a higher debt ratio.
+    debt_ratio = 100 - average_mi
+    return f"{debt_ratio:.2f}%"
 
 @app.route('/analyze', methods=['POST'])
 def analyze_project():
-    """
-    The main API endpoint. Expects a JSON payload with a 'repositoryUrl'.
-    Clones the repo into a temporary directory, runs analysis, and returns JSON metadata.
-    """
-    data = request.get_json()
-    if not data or 'repositoryUrl' not in data:
-        return jsonify({"error": "Missing 'repositoryUrl' in request body"}), 400
+    repo_url = request.get_json().get('repositoryUrl')
+    if not repo_url:
+        return jsonify({"error": "Missing 'repositoryUrl'"}), 400
 
-    repo_url = data['repositoryUrl']
-
-    # Use a temporary directory that is automatically cleaned up when we're done
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
-            print(f"Cloning {repo_url} into {temp_dir}...")
-            # 1. CLONE THE REPOSITORY
-            run_command(['git', 'clone', repo_url, '.'], temp_dir)
-            print("Clone successful.")
-
-            # --- GATHER METADATA USING COMMAND-LINE TOOLS ---
-
-            # 2. GET COMMIT COUNT
-            commit_count_str = run_command(['git', 'rev-list', '--all', '--count'], temp_dir)
-            commit_count = int(commit_count_str)
-            print(f"Found {commit_count} commits.")
-
-            # 3. GET CONTRIBUTOR COUNT
-            contributor_count_str = run_command(['git', 'shortlog', '-s', '-n', '--all'], temp_dir)
-            # Each line is a contributor, so we count the lines
-            contributor_count = len(contributor_count_str.splitlines())
-            print(f"Found {contributor_count} contributors.")
-
-            # 4. RUN CLOC FOR LANGUAGE BREAKDOWN AND FILE COUNTS
-            # The --json flag is amazing, it gives us structured data directly
-            cloc_output_json = run_command(['cloc', '--json', '.'], temp_dir)
-            cloc_data = json.loads(cloc_output_json)
-            print("cloc analysis successful.")
-
-            # --- ASSEMBLE THE FINAL METADATA OBJECT ---
-            # We remove the 'header' from cloc data as it's not needed
-            cloc_data.pop('header', None)
+            # We add a depth limit to speed up cloning for large repositories
+            run_command(['git', 'clone', '--depth=100', repo_url, '.'], temp_dir)
             
-            # The 'SUM' key from cloc gives us totals for files and lines of code
-            summary = cloc_data.pop('SUM', {})
+            # --- TIER 1 & 3: ACTIVITY METRICS ---
+            last_commit_date = run_command(['git', 'log', '-1', '--format=%cd'], temp_dir)
+            
+            total_commits_str = run_command(['git', 'rev-list', '--all', '--count'], temp_dir)
+            total_commits = int(total_commits_str) if total_commits_str else 0
+            
+            contributor_count_str = run_command(['git', 'shortlog', '-s', '-n', '--all'], temp_dir)
+            contributor_count = len(contributor_count_str.splitlines()) if contributor_count_str else 0
 
+            active_branches_str = run_command(['git', 'branch', '-r'], temp_dir)
+            active_branches = len(active_branches_str.splitlines()) if active_branches_str else 0
+            
+            # Calculate commit frequency
+            first_commit_unix_ts_str = run_command(['git', 'rev-list', '--max-parents=0', 'HEAD', '--format=%ct'], temp_dir)
+            last_commit_unix_ts_str = run_command(['git', 'log', '-1', '--format=%ct'], temp_dir)
+
+            commit_frequency = 0
+            if first_commit_unix_ts_str and last_commit_unix_ts_str:
+                first_commit_unix_ts = int(first_commit_unix_ts_str.splitlines()[-1])
+                last_commit_unix_ts = int(last_commit_unix_ts_str)
+                project_age_seconds = last_commit_unix_ts - first_commit_unix_ts
+                # Avoid division by zero for very new projects
+                if project_age_seconds > 0:
+                    project_age_months = project_age_seconds / (86400 * 30.44)
+                    commit_frequency = total_commits / project_age_months if project_age_months > 0 else 0
+
+            # --- IDENTIFICATION METRICS (cloc) ---
+            cloc_output_str = run_command(['cloc', '--json', '.'], temp_dir)
+            cloc_output = json.loads(cloc_output_str) if cloc_output_str else {}
+            cloc_output.pop('header', None)
+            summary = cloc_output.pop('SUM', {})
+            
+            # --- NEW: Call the technical debt function ---
+            tech_debt_ratio = calculate_technical_debt_ratio(temp_dir)
+            
+            # --- ASSEMBLE FINAL METADATA OBJECT ---
             metadata = {
                 "projectName": repo_url.split('/')[-1].replace('.git', ''),
                 "repositoryUrl": repo_url,
+                "lastAnalysisDate": datetime.now().isoformat(),
                 "identification": {
-                    "languageBreakdown": cloc_data,
+                    "languageBreakdown": cloc_output,
                     "totalFiles": summary.get('nFiles', 0),
                     "totalLinesOfCode": summary.get('code', 0),
-                    "totalCommentLines": summary.get('comment', 0),
-                    "totalBlankLines": summary.get('blank', 0),
+                    "dependencyCount": get_dependency_count(temp_dir)
                 },
                 "activity": {
-                    "totalCommits": commit_count,
+                    "lastCommitDate": last_commit_date,
+                    "totalCommits": total_commits,
                     "contributorCount": contributor_count,
+                    "commitFrequency": round(commit_frequency, 2),
+                    "activeBranches": active_branches
                 },
-                # Placeholder for future quality metrics
                 "qualityHealth": {
-                    "technicalDebtRatio": "N/A",
-                    "codeIssues": {},
+                    "technicalDebtRatio": tech_debt_ratio, # <-- UPDATED VALUE
+                    "codeIssues": {"critical": "N/A", "major": "N/A", "minor": "N/A"},
+                    "codeCoverage": "N/A",
+                    "cyclomaticComplexity": "N/A",
+                    "duplicatedLines": "N/A"
                 }
             }
-
             return jsonify(metadata), 200
-
-        except subprocess.CalledProcessError:
-            return jsonify({"error": "Failed to analyze repository. Check if the URL is correct and public."}), 500
-        except FileNotFoundError:
-            return jsonify({"error": "A required command-line tool (like git or cloc) is not installed on the server."}), 500
+            
         except Exception as e:
-            print(f"An unexpected error occurred: {e}")
-            return jsonify({"error": "An internal server error occurred."}), 500
+            error_message = f"An unexpected error occurred in the backend: {str(e)}"
+            print(error_message)
+            return jsonify({"error": error_message}), 500
 
 if __name__ == '__main__':
-    # Runs the app in debug mode for development
     app.run(debug=True, port=5000)
