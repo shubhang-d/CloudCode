@@ -42,10 +42,8 @@ const vscode = __importStar(require("vscode"));
 const ProjectAnalysisProvider_1 = require("./ProjectAnalysisProvider");
 const node_fetch_1 = __importDefault(require("node-fetch"));
 const child_process_1 = require("child_process"); // Import the 'exec' function
-// This method is called when your extension is activated
 function activate(context) {
     console.log('Congratulations, your extension "cloudcode" is now active!');
-    // Create and register the Tree View provider (no changes here)
     const projectAnalysisProvider = new ProjectAnalysisProvider_1.ProjectAnalysisProvider();
     vscode.window.registerTreeDataProvider('cloudcode.projectsView', projectAnalysisProvider);
     // Register the command to trigger the analysis
@@ -97,11 +95,6 @@ function activate(context) {
     });
     context.subscriptions.push(disposable);
 }
-/**
- * A helper function to run the git command and get the remote URL.
- * It uses a Promise to work nicely with async/await.
- * @param cwd The directory to run the command in (the project root).
- */
 function getGitRemoteUrl(cwd) {
     return new Promise((resolve) => {
         // Execute the command to get the remote URL for 'origin'
@@ -115,6 +108,5 @@ function getGitRemoteUrl(cwd) {
         });
     });
 }
-// This method is called when your extension is deactivated
 function deactivate() { }
 //# sourceMappingURL=extension.js.map

@@ -2,7 +2,6 @@
 
 import * as vscode from 'vscode';
 
-// The InfoItem class remains the same.
 export class InfoItem extends vscode.TreeItem {
     constructor(
         public readonly label: string,
@@ -21,7 +20,7 @@ export class ProjectAnalysisProvider implements vscode.TreeDataProvider<InfoItem
 
     getChildren(element?: InfoItem): vscode.ProviderResult<InfoItem[]> {
         if (!this.analysisData) {
-            return Promise.resolve([new InfoItem("Analyze a project to see details", vscode.TreeItemCollapsibleState.None)]);
+            return Promise.resolve([new InfoItem("Run 'Analyze Project' to see details", vscode.TreeItemCollapsibleState.None)]);
         }
 
         // Root level items
@@ -34,13 +33,8 @@ export class ProjectAnalysisProvider implements vscode.TreeDataProvider<InfoItem
             ]);
         }
 
-        // ==================================================================
-        // THE FIX IS IN THIS SECTION: We now safely access all properties.
-        // Using `?.` prevents crashes if a parent object is missing.
-        // Using `?? 'N/A'` provides a default value if the data is null/undefined.
-        // ==================================================================
-
-        // Child level items
+        // Using optional chaining (?.) and nullish coalescing (??) for safety.
+        // This prevents errors if any part of the data is missing and provides a default value.
         switch (element.label) {
             case 'Project Info':
                 const projectName = this.analysisData?.projectName ?? 'N/A';
@@ -48,9 +42,9 @@ export class ProjectAnalysisProvider implements vscode.TreeDataProvider<InfoItem
                 const lastAnalysis = this.analysisData?.lastAnalysisDate ? new Date(this.analysisData.lastAnalysisDate).toLocaleString() : 'N/A';
 
                 return Promise.resolve([
-                    new InfoItem('Name', vscode.TreeItemCollapsibleState.None, projectName),
-                    new InfoItem('URL', vscode.TreeItemCollapsibleState.None, repoUrl),
-                    new InfoItem('Last Analysis', vscode.TreeItemCollapsibleState.None, lastAnalysis)
+                    new InfoItem('Name', vscode.TreeItemCollapsibleState.None, this.analysisData?.projectName ?? 'N/A'),
+                    new InfoItem('URL', vscode.TreeItemCollapsibleState.None, this.analysisData?.repositoryUrl ?? 'N/A'),
+                    new InfoItem('Last Analysis', vscode.TreeItemCollapsibleState.None, this.analysisData?.lastAnalysisDate ? new Date(this.analysisData.lastAnalysisDate).toLocaleString() : 'N/A')
                 ]);
 
             case 'Identification':
@@ -59,9 +53,9 @@ export class ProjectAnalysisProvider implements vscode.TreeDataProvider<InfoItem
                 const dependencies = (this.analysisData?.identification?.dependencyCount ?? 'N/A').toString();
 
                 return Promise.resolve([
-                    new InfoItem('Total Files', vscode.TreeItemCollapsibleState.None, totalFiles),
-                    new InfoItem('Lines of Code', vscode.TreeItemCollapsibleState.None, linesOfCode),
-                    new InfoItem('Dependencies', vscode.TreeItemCollapsibleState.None, dependencies),
+                    new InfoItem('Total Files', vscode.TreeItemCollapsibleState.None, (this.analysisData?.identification?.totalFiles ?? 'N/A').toString()),
+                    new InfoItem('Lines of Code', vscode.TreeItemCollapsibleState.None, (this.analysisData?.identification?.totalLinesOfCode ?? 'N/A').toString()),
+                    new InfoItem('Dependencies', vscode.TreeItemCollapsibleState.None, (this.analysisData?.identification?.dependencyCount ?? 'N/A').toString()),
                     new InfoItem('Languages', vscode.TreeItemCollapsibleState.Collapsed)
                 ]);
             
@@ -82,20 +76,19 @@ export class ProjectAnalysisProvider implements vscode.TreeDataProvider<InfoItem
                 const activeBranches = (this.analysisData?.activity?.activeBranches ?? 'N/A').toString();
 
                 return Promise.resolve([
-                    new InfoItem('Last Commit', vscode.TreeItemCollapsibleState.None, lastCommit),
-                    new InfoItem('Total Commits', vscode.TreeItemCollapsibleState.None, totalCommits),
-                    new InfoItem('Contributors', vscode.TreeItemCollapsibleState.None, contributors),
-                    new InfoItem('Commit Frequency', vscode.TreeItemCollapsibleState.None, `${commitFreq} commits/month`),
-                    new InfoItem('Active Branches', vscode.TreeItemCollapsibleState.None, activeBranches)
+                    new InfoItem('Last Commit', vscode.TreeItemCollapsibleState.None, this.analysisData?.activity?.lastCommitDate ? new Date(this.analysisData.activity.lastCommitDate).toLocaleString() : 'N/A'),
+                    new InfoItem('Total Commits', vscode.TreeItemCollapsibleState.None, (this.analysisData?.activity?.totalCommits ?? 'N/A').toString()),
+                    new InfoItem('Contributors', vscode.TreeItemCollapsibleState.None, (this.analysisData?.activity?.contributorCount ?? 'N/A').toString()),
+                    new InfoItem('Commit Frequency', vscode.TreeItemCollapsibleState.None, `${this.analysisData?.activity?.commitFrequency ?? 'N/A'} commits/month`),
+                    new InfoItem('Active Branches', vscode.TreeItemCollapsibleState.None, (this.analysisData?.activity?.activeBranches ?? 'N/A').toString())
                 ]);
             
             case 'Quality Health':
-                const quality = this.analysisData?.qualityHealth;
                 return Promise.resolve([
-                    new InfoItem('Code Coverage', vscode.TreeItemCollapsibleState.None, quality?.codeCoverage ?? 'N/A'),
-                    new InfoItem('Technical Debt Ratio', vscode.TreeItemCollapsibleState.None, quality?.technicalDebtRatio ?? 'N/A'),
-                    new InfoItem('Cyclomatic Complexity', vscode.TreeItemCollapsibleState.None, quality?.cyclomaticComplexity ?? 'N/A'),
-                    new InfoItem('Duplicated Lines', vscode.TreeItemCollapsibleState.None, quality?.duplicatedLines ?? 'N/A'),
+                    new InfoItem('Code Coverage', vscode.TreeItemCollapsibleState.None, this.analysisData?.qualityHealth?.codeCoverage ?? 'N/A'),
+                    new InfoItem('Technical Debt Ratio', vscode.TreeItemCollapsibleState.None, this.analysisData?.qualityHealth?.technicalDebtRatio ?? 'N/A'),
+                    new InfoItem('Cyclomatic Complexity', vscode.TreeItemCollapsibleState.None, this.analysisData?.qualityHealth?.cyclomaticComplexity ?? 'N/A'),
+                    new InfoItem('Duplicated Lines', vscode.TreeItemCollapsibleState.None, this.analysisData?.qualityHealth?.duplicatedLines ?? 'N/A'),
                     new InfoItem('Code Issues', vscode.TreeItemCollapsibleState.Collapsed)
                 ]);
 
