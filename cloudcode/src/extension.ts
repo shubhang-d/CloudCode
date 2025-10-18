@@ -1,69 +1,207 @@
 import * as vscode from 'vscode';
-import { ProjectAnalysisProvider } from './ProjectAnalysisProvider'; 
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { ProjectAnalysisProvider } from './ProjectAnalysisProvider';
 import fetch from 'node-fetch';
+import { exec } from 'child_process';
 
-// This method is called when your extension is activated
+// --- NEW, SELF-CONTAINED LOCAL ANALYSIS LOGIC ---
+
+// A simple map to identify languages by their file extension.
+const LANGUAGE_MAP: { [key: string]: string } = {
+    '.js': 'JavaScript', '.jsx': 'JavaScript', '.ts': 'TypeScript', '.tsx': 'TypeScript',
+    '.py': 'Python', '.java': 'Java', '.cs': 'C#', '.cpp': 'C++', '.h': 'C++',
+    '.html': 'HTML', '.css': 'CSS', '.scss': 'SCSS', '.json': 'JSON', '.md': 'Markdown',
+    '.yml': 'YAML', '.yaml': 'YAML', '.xml': 'XML', '.gitignore': 'Ignore'
+};
+
+const EXCLUDE_DIRS = new Set(['node_modules', 'venv', '.venv', '.git', 'dist', 'out', 'build', '.vscode', '__pycache__']);
+
+/**
+ * Our custom, lightweight version of 'cloc'.
+ * Traverses a directory, identifies known file types, and counts lines.
+ * @param rootDir The starting directory for the analysis.
+ * @returns A promise that resolves to an object similar to the cloc output.
+ */
+async function performLocalAnalysis(rootDir: string): Promise<any> {
+    const stats: { [lang: string]: { nFiles: number, code: number, comment?: number, blank?: number } } = {};
+    let totalFiles = 0;
+    let totalLines = 0;
+
+    async function traverse(currentPath: string) {
+        const entries = await fs.readdir(currentPath, { withFileTypes: true });
+
+        for (const entry of entries) {
+            if (EXCLUDE_DIRS.has(entry.name)) {
+                continue; // Skip excluded directories
+            }
+
+            const fullPath = path.join(currentPath, entry.name);
+            if (entry.isDirectory()) {
+                await traverse(fullPath);
+            } else if (entry.isFile()) {
+                const ext = path.extname(entry.name);
+                const language = LANGUAGE_MAP[ext];
+
+                if (language) {
+                    try {
+                        const content = await fs.readFile(fullPath, 'utf-8');
+                        const lineCount = content.split('\n').length;
+                        
+                        if (!stats[language]) {
+                            stats[language] = { nFiles: 0, code: 0 };
+                        }
+                        stats[language].nFiles++;
+                        stats[language].code += lineCount;
+                        
+                        totalFiles++;
+                        totalLines += lineCount;
+                    } catch (readErr) {
+                        console.warn(`Could not read file: ${fullPath}`, readErr);
+                    }
+                }
+            }
+        }
+    }
+
+    await traverse(rootDir);
+    
+    // Format the output to match what our TreeView expects
+    stats['SUM'] = {
+        nFiles: totalFiles,
+        code: totalLines,
+        comment: 0, // Not implemented for simplicity
+        blank: 0    // Not implemented for simplicity
+    };
+
+    return stats;
+}
+
+
+// --- MAIN EXTENSION LOGIC (MOSTLY UNCHANGED) ---
+
 export function activate(context: vscode.ExtensionContext) {
-
     console.log('Congratulations, your extension "cloudcode" is now active!');
 
-    // 1. CREATE AND REGISTER THE TREE VIEW DATA PROVIDER
-    // This creates an instance of our provider class.
     const projectAnalysisProvider = new ProjectAnalysisProvider();
-    
-    // This registers the provider with VS Code. The first argument MUST match the view ID from package.json.
     vscode.window.registerTreeDataProvider('cloudcode.projectsView', projectAnalysisProvider);
-    console.log("Tree data provider registered.");
 
-    // 2. REGISTER THE COMMAND TO TRIGGER THE ANALYSIS
     let disposable = vscode.commands.registerCommand('cloudcode.analyzeProject', async () => {
-        // Prompt the user to enter a Git repository URL
-        const repoUrl = await vscode.window.showInputBox({
-            prompt: "Enter a public Git repository URL to analyze",
-            placeHolder: "e.g., https://github.com/microsoft/vscode-extension-samples.git"
-        });
-
-        if (repoUrl) {
-            // Use vscode.window.withProgress to show a loading notification
-            vscode.window.withProgress({
-                location: vscode.ProgressLocation.Notification,
-                title: "Analyzing Project...",
-                cancellable: false
-            }, async (progress) => {
-                progress.report({ increment: 0, message: "Connecting to backend..." });
-                
-                try {
-                    // Make the POST request to our Python backend
-                    const response = await fetch('http://127.0.0.1:5000/analyze', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ repositoryUrl: repoUrl })
-                    });
-                    
-                    progress.report({ increment: 50, message: "Processing data..." });
-
-                    if (!response.ok) {
-                        const errorData = await response.json();
-                        throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
-                    }
-
-                    const metadata = await response.json();
-                    
-                    // IMPORTANT: Pass the received data to our provider and refresh the view
-                    projectAnalysisProvider.refreshWithData(metadata);
-
-                    vscode.window.showInformationMessage('Project analysis complete!');
-
-                } catch (error: any) {
-                    vscode.window.showErrorMessage(`Analysis failed: ${error.message}`);
-                    console.error(error);
-                }
-            });
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (!workspaceFolders || workspaceFolders.length === 0) {
+            vscode.window.showErrorMessage('Please open a project folder to analyze.');
+            return;
         }
+        const projectRoot = workspaceFolders[0].uri.fsPath;
+
+        vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: "Analyzing Project...",
+            cancellable: false
+        }, async (progress) => {
+            try {
+                const isGitRepo = await isGitRepository(projectRoot);
+                let metadata;
+
+                if (isGitRepo) {
+                    progress.report({ increment: 10, message: "Git repository detected. Finding remote URL..." });
+                    const repoUrl = await getGitRemoteUrl(projectRoot);
+                    if (!repoUrl) {
+                        vscode.window.showWarningMessage("This is a Git repo, but no remote 'origin' was found. Performing local-only analysis.");
+                        metadata = await analyzeLocalFolder(projectRoot, progress);
+                    } else {
+                        metadata = await analyzeRemoteRepo(repoUrl, progress);
+                    }
+                } else {
+                    vscode.window.showInformationMessage("This is not a Git repository. Performing local-only analysis.");
+                    progress.report({ increment: 10, message: "Performing local-only analysis..." });
+                    metadata = await analyzeLocalFolder(projectRoot, progress);
+                }
+
+                projectAnalysisProvider.refreshWithData(metadata);
+                vscode.window.showInformationMessage(`Analysis of '${metadata.projectName}' complete!`);
+
+            } catch (error: any) {
+                vscode.window.showErrorMessage(`Analysis failed: ${error.message}`);
+                console.error(error);
+            }
+        });
     });
 
     context.subscriptions.push(disposable);
 }
 
-// This method is called when your extension is deactivated
+async function analyzeLocalFolder(projectRoot: string, progress: vscode.Progress<{ message?: string; increment?: number }>): Promise<any> {
+    progress.report({ increment: 40, message: "Counting files and lines of code..." });
+
+    // This now calls our new, reliable, internal function!
+    const analysisResult = await performLocalAnalysis(projectRoot);
+
+    progress.report({ increment: 90, message: "Assembling local report..." });
+
+    const summary = analysisResult.SUM;
+    delete analysisResult.SUM;
+
+    const metadata = {
+        projectName: path.basename(projectRoot) + " (Local)",
+        repositoryUrl: "Local Folder",
+        lastAnalysisDate: new Date().toISOString(),
+        identification: {
+            languageBreakdown: analysisResult,
+            totalFiles: summary.nFiles,
+            totalLinesOfCode: summary.code,
+            dependencyCount: "N/A"
+        },
+        activity: {
+            lastCommitDate: "N/A", totalCommits: "N/A", contributorCount: "N/A",
+            commitFrequency: "N/A", activeBranches: "N/A",
+        },
+        qualityHealth: {
+            technicalDebtRatio: "N/A", codeIssues: { critical: "N/A", major: "N/A", minor: "N/A" },
+            codeCoverage: "N/A", cyclomaticComplexity: "N/A", duplicatedLines: "N/A"
+        }
+    };
+    return metadata;
+}
+
+async function analyzeRemoteRepo(repoUrl: string, progress: vscode.Progress<{ message?: string; increment?: number }>): Promise<any> {
+    progress.report({ increment: 30, message: "Connecting to analysis backend..." });
+    const response = await fetch('http://127.0.0.1:5000/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repositoryUrl: repoUrl })
+    });
+    
+    progress.report({ increment: 80, message: "Processing backend data..." });
+
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: "Received a non-JSON response from the server. Is it running correctly?" }));
+        throw new Error(errorData.error || `HTTP error! Status: ${response.status}`);
+    }
+    return await response.json();
+}
+
+async function isGitRepository(directory: string): Promise<boolean> {
+    try {
+        const gitPath = path.join(directory, '.git');
+        const stats = await fs.stat(gitPath);
+        return stats.isDirectory();
+    } catch (error) {
+        return false;
+    }
+}
+
+function getGitRemoteUrl(cwd: string): Promise<string | null> {
+    return new Promise((resolve) => {
+        exec('git config --get remote.origin.url', { cwd }, (err, stdout) => {
+            if (err || !stdout) {
+                console.warn("Could not get git remote URL:", err);
+                resolve(null);
+                return;
+            }
+            resolve(stdout.trim());
+        });
+    });
+}
+
 export function deactivate() {}
