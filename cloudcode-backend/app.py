@@ -7,13 +7,71 @@ import json
 from datetime import datetime
 from flask import Flask, request, jsonify
 import sys
+from dotenv import load_dotenv
+import google.generativeai as genai
 
 # Import radon for code analysis
 from radon.metrics import mi_visit
 from radon.visitors import ComplexityVisitor
 from radon.cli.tools import iter_filenames
 
+# --- GEMINI API SETUP (NEW) ---
+# Load environment variables from a .env file
+load_dotenv()
+# TODO: Add your Gemini API Key to a .env file in this directory
+# e.g., GOOGLE_API_KEY="your_api_key_here"
+# genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+
 app = Flask(__name__)
+
+# --- NEW FUNCTION TO CALL THE LLM FOR REFACTORING ---
+def call_gemini_for_modernization(code_snippet, language):
+    """
+    Calls the Gemini API to modernize the given code snippet.
+    
+    THIS IS A PLACEHOLDER. Replace the logic here with the actual API call.
+    """
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        # If no API key is set, return a hardcoded, simulated response for demonstration.
+        print("WARNING: GOOGLE_API_KEY not found. Using simulated modernization response.")
+        if language == 'javascript':
+            # Example: Modernizing old JavaScript
+            if "var" in code_snippet and "function" in code_snippet:
+                return "const modernizedFunction = async () => {\n  // Modernized logic here...\n  // Using let/const and async/await\n};"
+        return f"/* Simulated modernization for {language}. Please configure your API key. */\n{code_snippet}"
+
+    # --- THIS IS THE REAL GEMINI API CALL LOGIC ---
+    try:
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        prompt = (
+            f"You are an expert programmer. Please modernize the following {language} code snippet. "
+            "Update it to use the latest syntax, idioms, and best practices. "
+            "Only return the modernized code itself, without any explanations, comments, or markdown formatting."
+        )
+        
+        response = model.generate_content([prompt, code_snippet])
+        return response.text
+        
+    except Exception as e:
+        print(f"Error calling Gemini API: {e}")
+        return f"// Error during modernization: {e}"
+    # --- END OF REAL GEMINI LOGIC ---
+
+# --- NEW ENDPOINT FOR REFACTORING (NEW) ---
+@app.route('/refactor/modernize', methods=['POST'])
+def modernize_code():
+    data = request.get_json()
+    code_snippet = data.get('code_snippet')
+    language = data.get('language', 'unknown') # Default to 'unknown' if not provided
+
+    if not code_snippet:
+        return jsonify({"error": "Missing 'code_snippet' in request"}), 400
+
+    modernized_code = call_gemini_for_modernization(code_snippet, language)
+    
+    return jsonify({"modernizedCode": modernized_code}), 200
+
 
 def run_command(command, working_dir, check=True):
     """
@@ -36,7 +94,6 @@ def run_command(command, working_dir, check=True):
 
 def get_dependency_count(repo_dir):
     """Counts dependencies from common package manager files."""
-    # (This function is unchanged)
     count = 0
     try:
         with open(os.path.join(repo_dir, 'package.json'), 'r', encoding='utf-8') as f:
@@ -54,7 +111,6 @@ def get_dependency_count(repo_dir):
 
 def calculate_technical_debt_ratio(repo_dir):
     """Calculates a technical debt ratio based on the average Maintainability Index."""
-    # (This function is unchanged)
     total_mi_score = 0
     file_count = 0
     exclude_patterns = "*/node_modules/*,*/venv/*,*/.git/*,*/dist/*,*/build/*"
@@ -75,7 +131,6 @@ def calculate_technical_debt_ratio(repo_dir):
 
 def calculate_average_complexity(repo_dir):
     """Calculates the average Cyclomatic Complexity per function/method."""
-    # (This function is unchanged)
     total_complexity, function_count = 0, 0
     exclude_patterns = "*/node_modules/*,*/venv/*,*/.git/*,*/dist/*,*/build/*"
     supported_files = list(iter_filenames([repo_dir], exclude=exclude_patterns))
@@ -92,7 +147,6 @@ def calculate_average_complexity(repo_dir):
     average_complexity = total_complexity / function_count
     return f"{average_complexity:.2f}"
 
-# --- NEW FUNCTION TO SCAN FOR VULNERABILITIES (PART 3) ---
 def analyze_vulnerabilities(repo_dir):
     """
     Scans for vulnerabilities in package.json and requirements.txt and
@@ -100,27 +154,22 @@ def analyze_vulnerabilities(repo_dir):
     """
     issues = {"critical": 0, "major": 0, "minor": 0}
 
-    # --- Scan Node.js dependencies ---
     if os.path.exists(os.path.join(repo_dir, 'package.json')):
         print("Found package.json, running npm audit...")
-        # Install dependencies first, but don't fail the whole analysis if it breaks
         run_command(['npm', 'install', '--omit=dev', '--legacy-peer-deps'], repo_dir, check=False)
-        # Run audit, allow it to fail (returns non-zero exit code if vulns are found)
         audit_output = run_command(['npm', 'audit', '--json'], repo_dir, check=False)
         if audit_output:
             try:
                 audit_data = json.loads(audit_output)
                 summary = audit_data.get('summary', {})
                 issues['critical'] += summary.get('critical', 0)
-                issues['major'] += summary.get('high', 0) # Mapping 'high' from npm to 'major'
+                issues['major'] += summary.get('high', 0)
                 issues['minor'] += summary.get('moderate', 0) + summary.get('low', 0)
             except json.JSONDecodeError:
                 print("Could not parse npm audit JSON output.")
 
-    # --- Scan Python dependencies ---
     if os.path.exists(os.path.join(repo_dir, 'requirements.txt')):
         print("Found requirements.txt, running safety check...")
-        # Create a temporary virtual environment to not pollute the main one
         temp_venv_path = os.path.join(repo_dir, "temp_venv_for_scan")
         python_executable = sys.executable
         run_command([python_executable, '-m', 'venv', temp_venv_path], repo_dir)
@@ -128,14 +177,11 @@ def analyze_vulnerabilities(repo_dir):
         pip_path = os.path.join(temp_venv_path, 'bin', 'pip')
         safety_path = os.path.join(temp_venv_path, 'bin', 'safety')
 
-        # Install dependencies into the temporary venv
         run_command([pip_path, 'install', '-r', 'requirements.txt'], repo_dir, check=False)
-        # Run safety check
         safety_output = run_command([safety_path, 'check', '--json'], repo_dir, check=False)
         if safety_output:
             try:
                 safety_data = json.loads(safety_output)
-                # For simplicity, we'll classify all Python vulns as 'major' for now
                 issues['major'] += len(safety_data)
             except json.JSONDecodeError:
                 print("Could not parse safety check JSON output.")
@@ -153,11 +199,9 @@ def analyze_project():
         try:
             run_command(['git', 'clone', '--depth=100', repo_url, '.'], temp_dir)
             
-            # (Git and cloc metrics gathering remains the same)
             last_commit_date = run_command(['git', 'log', '-1', '--format=%cd'], temp_dir)
             total_commits_str = run_command(['git', 'rev-list', '--all', '--count'], temp_dir)
             total_commits = int(total_commits_str) if total_commits_str else 0
-            # ... (other git commands are the same) ...
             contributor_count_str = run_command(['git', 'shortlog', '-s', '-n', '--all'], temp_dir)
             contributor_count = len(contributor_count_str.splitlines()) if contributor_count_str else 0
             active_branches_str = run_command(['git', 'branch', '-r'], temp_dir)
@@ -179,12 +223,10 @@ def analyze_project():
             cloc_output.pop('header', None)
             summary = cloc_output.pop('SUM', {})
 
-            # --- Call all quality health functions ---
             tech_debt_ratio = calculate_technical_debt_ratio(temp_dir)
             avg_complexity = calculate_average_complexity(temp_dir)
-            code_issues = analyze_vulnerabilities(temp_dir) # <-- NEW CALL
+            code_issues = analyze_vulnerabilities(temp_dir)
 
-            # --- ASSEMBLE FINAL METADATA OBJECT ---
             metadata = {
                 "projectName": repo_url.split('/')[-1].replace('.git', ''),
                 "repositoryUrl": repo_url, "lastAnalysisDate": datetime.now().isoformat(),
@@ -192,7 +234,7 @@ def analyze_project():
                 "activity": {"lastCommitDate": last_commit_date, "totalCommits": total_commits, "contributorCount": contributor_count, "commitFrequency": round(commit_frequency, 2), "activeBranches": active_branches},
                 "qualityHealth": {
                     "technicalDebtRatio": tech_debt_ratio,
-                    "codeIssues": code_issues, # <-- UPDATED VALUE
+                    "codeIssues": code_issues,
                     "codeCoverage": "N/A",
                     "cyclomaticComplexity": avg_complexity,
                     "duplicatedLines": "N/A"
