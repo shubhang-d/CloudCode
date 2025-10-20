@@ -1,3 +1,6 @@
 Flask
 randon
 safety
+google-generativeai
+python-dotenv
+Flask-Cors

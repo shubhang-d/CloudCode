@@ -4,6 +4,7 @@ import * as path from 'path';
 import { ProjectAnalysisProvider } from './ProjectAnalysisProvider';
 import fetch from 'node-fetch';
 import { exec } from 'child_process';
+import { ExplainViewProvider } from './ExplainViewProvider';
 
 // --- NEW, SELF-CONTAINED LOCAL ANALYSIS LOGIC ---
 
@@ -82,6 +83,21 @@ export function activate(context: vscode.ExtensionContext) {
     console.log('Congratulations, your extension "cloudcode" is now active!');
     const projectAnalysisProvider = new ProjectAnalysisProvider();
     vscode.window.registerTreeDataProvider('cloudcode.projectsView', projectAnalysisProvider);
+
+    const explainProvider = new ExplainViewProvider(context.extensionUri);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(ExplainViewProvider.viewType, explainProvider)
+    );
+
+    context.subscriptions.push(
+        vscode.window.onDidChangeTextEditorSelection(e => {
+            // If the selection is not empty, send it to the webview
+            if (!e.textEditor.selection.isEmpty) {
+                const selectedText = e.textEditor.document.getText(e.textEditor.selection);
+                explainProvider.populateFromSelection(selectedText);
+            }
+        })
+    );
 
     // --- ANALYZE PROJECT COMMAND ---
     const analyzeProjectCommand = vscode.commands.registerCommand('cloudcode.analyzeProject', async () => {

@@ -44,6 +44,7 @@ const path = __importStar(require("path"));
 const ProjectAnalysisProvider_1 = require("./ProjectAnalysisProvider");
 const node_fetch_1 = __importDefault(require("node-fetch"));
 const child_process_1 = require("child_process");
+const ExplainViewProvider_1 = require("./ExplainViewProvider");
 // --- NEW, SELF-CONTAINED LOCAL ANALYSIS LOGIC ---
 // A simple map to identify languages by their file extension.
 const LANGUAGE_MAP = {
@@ -109,6 +110,15 @@ function activate(context) {
     console.log('Congratulations, your extension "cloudcode" is now active!');
     const projectAnalysisProvider = new ProjectAnalysisProvider_1.ProjectAnalysisProvider();
     vscode.window.registerTreeDataProvider('cloudcode.projectsView', projectAnalysisProvider);
+    const explainProvider = new ExplainViewProvider_1.ExplainViewProvider(context.extensionUri);
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider(ExplainViewProvider_1.ExplainViewProvider.viewType, explainProvider));
+    context.subscriptions.push(vscode.window.onDidChangeTextEditorSelection(e => {
+        // If the selection is not empty, send it to the webview
+        if (!e.textEditor.selection.isEmpty) {
+            const selectedText = e.textEditor.document.getText(e.textEditor.selection);
+            explainProvider.populateFromSelection(selectedText);
+        }
+    }));
     // --- ANALYZE PROJECT COMMAND ---
     const analyzeProjectCommand = vscode.commands.registerCommand('cloudcode.analyzeProject', async () => {
         const workspaceFolders = vscode.workspace.workspaceFolders;
