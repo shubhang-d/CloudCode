@@ -55,6 +55,11 @@
           "id": "cloudcode.refactorActionsView",
           "name": "Refactor Actions",
           "contextualTitle": "CloudCode"
+        },
+        {
+          "id": "cloudcode.explainView",
+          "type": "webview",
+          "name": "Explain Code"
         }
       ]
     }
@@ -76,6 +81,7 @@
     "@typescript-eslint/parser": "^8.45.0",
     "@vscode/test-cli": "^0.0.11",
     "@vscode/test-electron": "^2.5.2",
+    "@vscode/webview-ui-toolkit": "^1.4.0",
     "eslint": "^9.36.0",
     "typescript": "^5.9.3"
   },

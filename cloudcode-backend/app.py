@@ -1,11 +1,10 @@
-# cloudcode-backend/app.py
-
 import os
 import subprocess
 import tempfile
 import json
 from datetime import datetime
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import sys
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -23,6 +22,7 @@ load_dotenv()
 # genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
 app = Flask(__name__)
+CORS(app)
 
 # --- NEW FUNCTION TO CALL THE LLM FOR REFACTORING ---
 def call_gemini_for_modernization(code_snippet, language):
@@ -187,6 +187,49 @@ def analyze_vulnerabilities(repo_dir):
                 print("Could not parse safety check JSON output.")
 
     return issues
+
+def call_gemini_for_explanation(code_snippet):
+    """Calls the Gemini API to explain the given code snippet."""
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        print("WARNING: GOOGLE_API_KEY not found. Using simulated explanation response.")
+        return """
+# Simulated Explanation
+
+This is a **simulated explanation** because the `GOOGLE_API_KEY` was not found.
+
+### Functionality
+*   It appears to take some input.
+*   It processes that input using some logic.
+*   It returns a result.
+
+`Please configure your API key in the .env file to get a real explanation.`
+"""
+
+    # --- REAL GEMINI API CALL LOGIC ---
+    try:
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        prompt = (
+            "You are an expert programmer acting as a helpful code assistant. "
+            "Please provide a clear, concise explanation for the following code snippet. "
+            "Structure your explanation using Markdown. Use headings for different sections "
+            "(like '## Purpose', '### Key Logic', etc.), use bullet points for lists, and "
+            "use triple backticks for code blocks and single backticks for inline code."
+        )
+        response = model.generate_content([prompt, code_snippet])
+        return response.text
+    except Exception as e:
+        print(f"Error calling Gemini API for explanation: {e}")
+        return f"An error occurred while trying to generate an explanation: {e}"
+
+@app.route('/explain-code', methods=['POST'])
+def explain_code():
+    data = request.get_json()
+    code_snippet = data.get('code_snippet')
+    if not code_snippet:
+        return jsonify({"error": "Missing 'code_snippet' in request"}), 400
+    explanation = call_gemini_for_explanation(code_snippet)
+    return jsonify({"explanation": explanation}), 200
 
 
 @app.route('/analyze', methods=['POST'])
