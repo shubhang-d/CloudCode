@@ -42,84 +42,115 @@ const vscode = __importStar(require("vscode"));
 const fs = __importStar(require("fs/promises"));
 const path = __importStar(require("path"));
 const ProjectAnalysisProvider_1 = require("./ProjectAnalysisProvider");
+const ExplainViewProvider_1 = require("./ExplainViewProvider");
+const VulnerabilityProvider_1 = require("./VulnerabilityProvider");
 const node_fetch_1 = __importDefault(require("node-fetch"));
 const child_process_1 = require("child_process");
-const ExplainViewProvider_1 = require("./ExplainViewProvider");
-// --- NEW, SELF-CONTAINED LOCAL ANALYSIS LOGIC ---
-// A simple map to identify languages by their file extension.
-const LANGUAGE_MAP = {
+// --- CONSTANTS FOR FILE SCANNING AND BATCHING ---
+// For the 'Analyze Project' feature (local-only mode)
+const LANGUAGE_MAP_ANALYZE = {
     '.js': 'JavaScript', '.jsx': 'JavaScript', '.ts': 'TypeScript', '.tsx': 'TypeScript',
     '.py': 'Python', '.java': 'Java', '.cs': 'C#', '.cpp': 'C++', '.h': 'C++',
     '.html': 'HTML', '.css': 'CSS', '.scss': 'SCSS', '.json': 'JSON', '.md': 'Markdown',
     '.yml': 'YAML', '.yaml': 'YAML', '.xml': 'XML', '.gitignore': 'Ignore'
 };
-const EXCLUDE_DIRS = new Set(['node_modules', 'venv', '.venv', '.git', 'dist', 'out', 'build', '.vscode', '__pycache__']);
+const EXCLUDE_DIRS_ANALYZE = new Set(['node_modules', 'venv', '.venv', '.git', 'dist', 'out', 'build', '.vscode', '__pycache__']);
+// For the 'Security Scan' feature
+const SCANNABLE_EXTENSIONS_SCAN = new Set(['.js', '.jsx', '.ts', '.tsx', '.py', '.java', '.go', '.cs', '.php', '.rb', '.html']);
+const EXCLUDE_DIRS_SCAN = new Set(['node_modules', 'venv', '.venv', '.git', 'dist', 'out', 'build', '.vscode', '__pycache__', 'target', 'bin']);
+// A conservative estimation: 1 token is roughly 4 characters.
+// We'll aim for batches under a safe limit to avoid exceeding the model's context window.
+const CHAR_TO_TOKEN_RATIO = 4;
+const SAFE_TOKEN_LIMIT = 100000;
+const SAFE_CHAR_LIMIT = SAFE_TOKEN_LIMIT * CHAR_TO_TOKEN_RATIO;
+// --- HELPER FUNCTIONS ---
 /**
- * Our custom, lightweight version of 'cloc'.
- * Traverses a directory, identifies known file types, and counts lines.
- * @param rootDir The starting directory for the analysis.
- * @returns A promise that resolves to an object similar to the cloc output.
+ * Creates manageable batches of project code to send to the AI for security analysis,
+ * respecting the model's token limits.
+ * @param rootDir The root directory of the project to scan.
+ * @returns A promise that resolves to an array of strings, where each string is a batch of code.
  */
-async function performLocalAnalysis(rootDir) {
-    const stats = {};
-    let totalFiles = 0;
-    let totalLines = 0;
-    async function traverse(currentPath) {
-        const entries = await fs.readdir(currentPath, { withFileTypes: true });
-        for (const entry of entries) {
-            if (EXCLUDE_DIRS.has(entry.name)) {
-                continue; // Skip excluded directories
-            }
-            const fullPath = path.join(currentPath, entry.name);
-            if (entry.isDirectory()) {
-                await traverse(fullPath);
-            }
-            else if (entry.isFile()) {
-                const ext = path.extname(entry.name);
-                const language = LANGUAGE_MAP[ext];
-                if (language) {
+async function createCodeBatches(rootDir) {
+    const allFiles = [];
+    // Step 1: Traverse filesystem to get all scannable file contents
+    async function collectFiles(currentPath) {
+        try {
+            const entries = await fs.readdir(currentPath, { withFileTypes: true });
+            for (const entry of entries) {
+                if (EXCLUDE_DIRS_SCAN.has(entry.name)) {
+                    continue; // This correctly skips excluded directories
+                }
+                const fullPath = path.join(currentPath, entry.name);
+                if (entry.isDirectory()) {
+                    await collectFiles(fullPath);
+                }
+                else if (entry.isFile() && SCANNABLE_EXTENSIONS_SCAN.has(path.extname(entry.name))) {
                     try {
                         const content = await fs.readFile(fullPath, 'utf-8');
-                        const lineCount = content.split('\n').length;
-                        if (!stats[language]) {
-                            stats[language] = { nFiles: 0, code: 0 };
-                        }
-                        stats[language].nFiles++;
-                        stats[language].code += lineCount;
-                        totalFiles++;
-                        totalLines += lineCount;
+                        allFiles.push({
+                            path: path.relative(rootDir, fullPath),
+                            content: content
+                        });
                     }
-                    catch (readErr) {
-                        console.warn(`Could not read file: ${fullPath}`, readErr);
+                    catch (err) {
+                        console.warn(`Could not read file ${fullPath}, skipping.`);
                     }
                 }
             }
         }
+        catch (err) {
+            console.error(`Could not read directory ${currentPath}`);
+        }
     }
-    await traverse(rootDir);
-    // Format the output to match what our TreeView expects
-    stats['SUM'] = {
-        nFiles: totalFiles,
-        code: totalLines,
-        comment: 0, // Not implemented for simplicity
-        blank: 0 // Not implemented for simplicity
-    };
-    return stats;
+    await collectFiles(rootDir);
+    // Step 2: Group files into batches, ensuring each batch is under the safe character limit
+    const batches = [];
+    let currentBatchContent = '';
+    let currentBatchCharCount = 0;
+    for (const file of allFiles) {
+        const fileHeader = `--- FILE: ${file.path} ---\n`;
+        const fileBlock = `${fileHeader}${file.content}\n\n`;
+        const fileBlockCharCount = fileBlock.length;
+        if (fileBlockCharCount > SAFE_CHAR_LIMIT) {
+            console.warn(`Skipping file ${file.path} as it exceeds the safe token limit by itself.`);
+            continue;
+        }
+        if (currentBatchCharCount + fileBlockCharCount > SAFE_CHAR_LIMIT) {
+            batches.push(currentBatchContent);
+            currentBatchContent = fileBlock;
+            currentBatchCharCount = fileBlockCharCount;
+        }
+        else {
+            currentBatchContent += fileBlock;
+            currentBatchCharCount += fileBlockCharCount;
+        }
+    }
+    if (currentBatchContent.length > 0) {
+        batches.push(currentBatchContent);
+    }
+    return batches;
 }
+/**
+ * The main activation function for the extension.
+ * This is called once when the extension is first activated.
+ */
 function activate(context) {
     console.log('Congratulations, your extension "cloudcode" is now active!');
+    // --- REGISTER ALL SIDEBAR PROVIDERS ---
     const projectAnalysisProvider = new ProjectAnalysisProvider_1.ProjectAnalysisProvider();
-    vscode.window.registerTreeDataProvider('cloudcode.projectsView', projectAnalysisProvider);
     const explainProvider = new ExplainViewProvider_1.ExplainViewProvider(context.extensionUri);
-    context.subscriptions.push(vscode.window.registerWebviewViewProvider(ExplainViewProvider_1.ExplainViewProvider.viewType, explainProvider));
+    const vulnerabilityProvider = new VulnerabilityProvider_1.VulnerabilityProvider();
+    context.subscriptions.push(vscode.window.registerTreeDataProvider('cloudcode.projectsView', projectAnalysisProvider), vscode.window.registerWebviewViewProvider(ExplainViewProvider_1.ExplainViewProvider.viewType, explainProvider), vscode.window.registerTreeDataProvider('cloudcode.vulnerabilitiesView', vulnerabilityProvider));
+    // --- REGISTER EVENT LISTENERS ---
+    // Automatically populates the "Explain Code" view when text is selected in the editor
     context.subscriptions.push(vscode.window.onDidChangeTextEditorSelection(e => {
-        // If the selection is not empty, send it to the webview
         if (!e.textEditor.selection.isEmpty) {
             const selectedText = e.textEditor.document.getText(e.textEditor.selection);
             explainProvider.populateFromSelection(selectedText);
         }
     }));
-    // --- ANALYZE PROJECT COMMAND ---
+    // --- REGISTER ALL COMMANDS ---
+    // COMMAND: Analyze Project
     const analyzeProjectCommand = vscode.commands.registerCommand('cloudcode.analyzeProject', async () => {
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (!workspaceFolders || workspaceFolders.length === 0) {
@@ -127,29 +158,26 @@ function activate(context) {
             return;
         }
         const projectRoot = workspaceFolders[0].uri.fsPath;
-        console.log(`Analyzing project at path: ${projectRoot}`);
         vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
             title: "Analyzing Project...",
             cancellable: false
         }, async (progress) => {
             try {
-                const isGitRepo = await isGitRepository(projectRoot);
                 let metadata;
+                const isGitRepo = await isGitRepository(projectRoot);
                 if (isGitRepo) {
-                    progress.report({ increment: 10, message: "Git repository detected. Finding remote URL..." });
                     const repoUrl = await getGitRemoteUrl(projectRoot);
-                    if (!repoUrl) {
-                        vscode.window.showWarningMessage("This is a Git repo, but no remote 'origin' was found. Performing local-only analysis.");
-                        metadata = await analyzeLocalFolder(projectRoot, progress);
+                    if (repoUrl) {
+                        metadata = await analyzeRemoteRepo(repoUrl, progress);
                     }
                     else {
-                        metadata = await analyzeRemoteRepo(repoUrl, progress);
+                        vscode.window.showWarningMessage("Git repo found, but no remote 'origin' was detected. Performing local-only analysis.");
+                        metadata = await analyzeLocalFolder(projectRoot, progress);
                     }
                 }
                 else {
                     vscode.window.showInformationMessage("This is not a Git repository. Performing local-only analysis.");
-                    progress.report({ increment: 10, message: "Performing local-only analysis..." });
                     metadata = await analyzeLocalFolder(projectRoot, progress);
                 }
                 projectAnalysisProvider.refreshWithData(metadata);
@@ -157,21 +185,18 @@ function activate(context) {
             }
             catch (error) {
                 vscode.window.showErrorMessage(`Analysis failed: ${error.message}`);
-                console.error(error);
             }
         });
     });
-    // --- MODERNIZE CODE COMMAND (NEW) ---
+    // COMMAND: Modernize Selection
     const modernizeCodeCommand = vscode.commands.registerCommand('cloudcode.modernizeCode', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
-            vscode.window.showInformationMessage("No active editor found.");
             return;
         }
         const selection = editor.selection;
         const selectedText = editor.document.getText(selection);
         if (!selectedText) {
-            vscode.window.showInformationMessage("Please select a code snippet to modernize.");
             return;
         }
         await vscode.window.withProgress({
@@ -180,69 +205,142 @@ function activate(context) {
             cancellable: true
         }, async (progress, token) => {
             try {
-                progress.report({ increment: 20, message: "Sending code to backend..." });
                 const response = await (0, node_fetch_1.default)('http://127.0.0.1:5000/refactor/modernize', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        code_snippet: selectedText,
-                        language: editor.document.languageId
-                    })
+                    body: JSON.stringify({ code_snippet: selectedText, language: editor.document.languageId })
                 });
                 if (token.isCancellationRequested) {
                     return;
                 }
                 if (!response.ok) {
-                    const errorData = await response.json().catch(() => ({ error: 'Failed to parse error response from backend.' }));
-                    throw new Error(errorData.error || `HTTP Error: ${response.status}`);
+                    const errorData = await response.json().catch(() => ({ error: 'Backend error' }));
+                    throw new Error(errorData.error);
                 }
                 const data = await response.json();
-                const modernizedCode = data.modernizedCode;
-                progress.report({ increment: 80, message: "Applying changes..." });
-                if (modernizedCode) {
-                    editor.edit(editBuilder => {
-                        editBuilder.replace(selection, modernizedCode);
-                    });
-                    vscode.window.showInformationMessage("Code modernized successfully!");
-                }
-                else {
-                    throw new Error("Backend did not return modernized code.");
-                }
+                editor.edit(editBuilder => {
+                    editBuilder.replace(selection, data.modernizedCode);
+                });
             }
             catch (error) {
                 vscode.window.showErrorMessage(`Failed to modernize code: ${error.message}`);
+            }
+        });
+    });
+    // COMMAND: Scan for Security Vulnerabilities
+    const scanForVulnerabilitiesCommand = vscode.commands.registerCommand('cloudcode.scanForVulnerabilities', async () => {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (!workspaceFolders || workspaceFolders.length === 0) {
+            vscode.window.showErrorMessage('Please open a project folder to scan.');
+            return;
+        }
+        const projectRoot = workspaceFolders[0].uri.fsPath;
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: "Scanning Project for Vulnerabilities...",
+            cancellable: true
+        }, async (progress, token) => {
+            try {
+                // Step 1: Clear previous results from the UI
+                vulnerabilityProvider.clear();
+                progress.report({ message: "Preparing code batches...", increment: 5 });
+                const codeBatches = await createCodeBatches(projectRoot);
+                if (token.isCancellationRequested) {
+                    return;
+                }
+                if (codeBatches.length === 0) {
+                    vscode.window.showInformationMessage("No scannable files found in the project.");
+                    vulnerabilityProvider.setScanComplete(); // Mark as complete to show "not found"
+                    return;
+                }
+                let totalVulnerabilitiesFound = 0;
+                const totalBatches = codeBatches.length;
+                // Step 2: Loop through each batch and update the UI in real-time
+                for (let i = 0; i < totalBatches; i++) {
+                    const batch = codeBatches[i];
+                    const progressIncrement = (1 / totalBatches) * 90;
+                    progress.report({
+                        message: `Analyzing Batch ${i + 1} of ${totalBatches}...`,
+                        increment: progressIncrement
+                    });
+                    const response = await (0, node_fetch_1.default)('http://127.0.0.1:5000/security/scan', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ code_batch: batch })
+                    });
+                    if (token.isCancellationRequested) {
+                        return;
+                    }
+                    if (!response.ok) {
+                        throw new Error(`Backend returned an error for Batch ${i + 1}.`);
+                    }
+                    const vulnerabilitiesFromBatch = await response.json();
+                    // THIS IS THE KEY CHANGE: Add results from the current batch and refresh the UI
+                    if (vulnerabilitiesFromBatch.length > 0) {
+                        totalVulnerabilitiesFound += vulnerabilitiesFromBatch.length;
+                        vulnerabilityProvider.addVulnerabilities(vulnerabilitiesFromBatch, projectRoot);
+                    }
+                }
+                // Step 3: Finalize the scan
+                vulnerabilityProvider.setScanComplete();
+                vscode.window.showInformationMessage(`Vulnerability scan complete. Found ${totalVulnerabilitiesFound} potential issues.`);
+            }
+            catch (error) {
+                vscode.window.showErrorMessage(`Vulnerability scan failed: ${error.message}`);
                 console.error(error);
             }
         });
     });
-    context.subscriptions.push(analyzeProjectCommand, modernizeCodeCommand);
+    context.subscriptions.push(analyzeProjectCommand, modernizeCodeCommand, scanForVulnerabilitiesCommand);
+}
+// --- HELPER FUNCTIONS FOR 'ANALYZE PROJECT' COMMAND ---
+async function performLocalAnalysis(rootDir) {
+    const stats = {};
+    let totalFiles = 0;
+    let totalLines = 0;
+    async function traverse(currentPath) {
+        const entries = await fs.readdir(currentPath, { withFileTypes: true });
+        for (const entry of entries) {
+            if (EXCLUDE_DIRS_ANALYZE.has(entry.name)) {
+                continue;
+            }
+            const fullPath = path.join(currentPath, entry.name);
+            if (entry.isDirectory()) {
+                await traverse(fullPath);
+            }
+            else if (entry.isFile()) {
+                const language = LANGUAGE_MAP_ANALYZE[path.extname(entry.name)];
+                if (language) {
+                    const content = await fs.readFile(fullPath, 'utf-8');
+                    const lineCount = content.split('\n').length;
+                    if (!stats[language]) {
+                        stats[language] = { nFiles: 0, code: 0 };
+                    }
+                    stats[language].nFiles++;
+                    stats[language].code += lineCount;
+                    totalFiles++;
+                    totalLines += lineCount;
+                }
+            }
+        }
+    }
+    await traverse(rootDir);
+    stats['SUM'] = { nFiles: totalFiles, code: totalLines };
+    return stats;
 }
 async function analyzeLocalFolder(projectRoot, progress) {
-    progress.report({ increment: 40, message: "Counting files and lines of code..." });
+    progress.report({ increment: 40, message: "Counting local files and lines of code..." });
     const analysisResult = await performLocalAnalysis(projectRoot);
-    progress.report({ increment: 90, message: "Assembling local report..." });
     const summary = analysisResult.SUM;
     delete analysisResult.SUM;
-    const metadata = {
+    return {
         projectName: path.basename(projectRoot) + " (Local)",
         repositoryUrl: "Local Folder",
         lastAnalysisDate: new Date().toISOString(),
-        identification: {
-            languageBreakdown: analysisResult,
-            totalFiles: summary.nFiles,
-            totalLinesOfCode: summary.code,
-            dependencyCount: "N/A"
-        },
-        activity: {
-            lastCommitDate: "N/A", totalCommits: "N/A", contributorCount: "N/A",
-            commitFrequency: "N/A", activeBranches: "N/A",
-        },
-        qualityHealth: {
-            technicalDebtRatio: "N/A", codeIssues: { critical: "N/A", major: "N/A", minor: "N/A" },
-            codeCoverage: "N/A", cyclomaticComplexity: "N/A", duplicatedLines: "N/A"
-        }
+        identification: { languageBreakdown: analysisResult, totalFiles: summary.nFiles, totalLinesOfCode: summary.code, dependencyCount: "N/A" },
+        activity: { lastCommitDate: "N/A", totalCommits: "N/A", contributorCount: "N/A", commitFrequency: "N/A", activeBranches: "N/A" },
+        qualityHealth: { technicalDebtRatio: "N/A", codeIssues: { critical: "N/A", major: "N/A", minor: "N/A" }, codeCoverage: "N/A", cyclomaticComplexity: "N/A", duplicatedLines: "N/A" }
     };
-    return metadata;
 }
 async function analyzeRemoteRepo(repoUrl, progress) {
     progress.report({ increment: 30, message: "Connecting to analysis backend..." });
@@ -253,15 +351,14 @@ async function analyzeRemoteRepo(repoUrl, progress) {
     });
     progress.report({ increment: 80, message: "Processing backend data..." });
     if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: "Received a non-JSON response from the server. Is it running correctly?" }));
-        throw new Error(errorData.error || `HTTP error! Status: ${response.status}`);
+        const errorData = await response.json().catch(() => ({ error: "Received a non-JSON response from the server." }));
+        throw new Error(errorData.error);
     }
     return await response.json();
 }
 async function isGitRepository(directory) {
     try {
-        const gitPath = path.join(directory, '.git');
-        const stats = await fs.stat(gitPath);
+        const stats = await fs.stat(path.join(directory, '.git'));
         return stats.isDirectory();
     }
     catch (error) {
@@ -271,14 +368,12 @@ async function isGitRepository(directory) {
 function getGitRemoteUrl(cwd) {
     return new Promise((resolve) => {
         (0, child_process_1.exec)('git config --get remote.origin.url', { cwd }, (err, stdout) => {
-            if (err || !stdout) {
-                console.warn("Could not get git remote URL:", err);
-                resolve(null);
-                return;
-            }
-            resolve(stdout.trim());
+            resolve((err || !stdout) ? null : stdout.trim());
         });
     });
 }
+/**
+ * Called when the extension is deactivated.
+ */
 function deactivate() { }
 //# sourceMappingURL=extension.js.map

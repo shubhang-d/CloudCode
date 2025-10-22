@@ -24,6 +24,10 @@
       {
         "command": "cloudcode.modernizeCode",
         "title": "CloudCode: Modernize Selection"
+      },
+      {
+        "command": "cloudcode.scanForVulnerabilities",
+        "title": "CloudCode: Scan for Security Vulnerabilities"
       }
     ],
     "menus": {
@@ -60,6 +64,10 @@
           "id": "cloudcode.explainView",
           "type": "webview",
           "name": "Explain Code"
+        },
+        {
+          "id": "cloudcode.vulnerabilitiesView",
+          "name": "Security Vulnerabilities"
         }
       ]
     }
