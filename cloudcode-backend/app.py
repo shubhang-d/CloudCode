@@ -80,35 +80,40 @@ def call_gemini_for_explanation(code_snippet):
         return f"An error occurred while trying to generate an explanation: {e}"
 
 def analyze_code_batch_with_gemini(code_batch):
-    """Sends a batch of code to Gemini for vulnerability analysis. GUARANTEES a list is returned."""
+    """Sends a batch of code to Gemini for a detailed vulnerability analysis."""
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         print("WARNING: GOOGLE_API_KEY not found. Using simulated security scan response.")
-        if "app.py" in code_batch and "request.get_json()" in code_batch:
+        if "app.py" in code_batch:
             return [{
                 "file_path": "cloudcode-backend/app.py",
-                "line_number": 20, "vulnerability_type": "Simulated: Potential XSS",
-                "description": "User input from a request is used without sanitization.",
-                "suggested_solution": "Use a library to escape any user-provided data."
+                "line_number": 120,
+                "line_of_code": "repo_url = request.get_json().get('repositoryUrl')",
+                "vulnerability_type": "Data Exposure",
+                "severity": "High",
+                "cwe": "CWE-200",
+                "description": "The application logs or returns raw request data, which might contain sensitive information.",
+                "suggested_solution": "Sanitize and validate all incoming data. Only log or return data that is explicitly needed and confirmed to be safe."
             }]
         return []
 
-    # --- REAL GEMINI API CALL LOGIC ---
+    # --- REAL GEMINI API CALL LOGIC (WITH ENHANCED PROMPT) ---
     try:
         model = genai.GenerativeModel('gemini-2.5-pro')
         prompt = (
             "You are a senior security engineer performing a complete code review. "
             "The following text contains source code from a project, with each file's content "
             "prefixed by a line like '--- FILE: path/to/file.js ---'.\n"
-            "Analyze the provided code for security vulnerabilities. Look for issues like "
-            "SQL Injection, Cross-Site Scripting (XSS), Insecure Deserialization, Command Injection, "
-            "Hardcoded Secrets, Improper Error Handling, and other common weaknesses (OWASP Top 10).\n"
+            "Analyze the provided code for security vulnerabilities (OWASP Top 10, etc.).\n"
             "Return your findings as a JSON list of objects. Each object must have the following keys:\n"
             "- 'file_path' (string): The full path of the file, extracted exactly from the '--- FILE: ... ---' marker.\n"
             "- 'line_number' (integer): The line number of the vulnerability *relative to the start of its file*.\n"
+            "- 'line_of_code' (string): The actual line of code where the vulnerability occurs.\n"
             "- 'vulnerability_type' (string): A concise name for the vulnerability (e.g., 'SQL Injection').\n"
-            "- 'description' (string): A clear explanation of the vulnerability and why it is a risk.\n"
-            "- 'suggested_solution' (string): A specific, actionable recommendation to fix the code.\n"
+            "- 'severity' (string): Your assessment of the severity. Must be one of: 'Critical', 'High', 'Medium', 'Low'.\n"
+            "- 'cwe' (string): The most relevant Common Weakness Enumeration ID, formatted as 'CWE-ID' (e.g., 'CWE-89').\n"
+            "- 'description' (string): A clear, multi-line explanation of the vulnerability and its risks.\n"
+            "- 'suggested_solution' (string): A specific, multi-line, actionable recommendation to fix the code.\n"
             "If no vulnerabilities are found, you MUST return an empty JSON list: []."
         )
         response = model.generate_content([prompt, code_batch])
@@ -118,12 +123,11 @@ def analyze_code_batch_with_gemini(code_batch):
     except Exception as e:
         print(f"Error analyzing code batch with Gemini: {e}")
         return [{
-            "file_path": "Analysis Error", "line_number": 1,
-            "vulnerability_type": "AI Analysis Failed",
+            "file_path": "Analysis Error", "line_number": 1, "line_of_code": "N/A",
+            "vulnerability_type": "AI Analysis Failed", "severity": "Critical", "cwe": "N/A",
             "description": f"The AI model failed to process a batch. Error: {str(e)}",
-            "suggested_solution": "This could be due to the batch size, content policies, or a temporary API issue. The scan will continue with other batches."
+            "suggested_solution": "This could be a temporary API issue or the project's complexity. The scan will continue with other batches."
         }]
-
 
 # --- API ENDPOINTS ---
 
