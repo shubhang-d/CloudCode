@@ -227,6 +227,65 @@ function activate(context) {
             }
         });
     });
+    // ==================================================================
+    // START: DOCUMENTATION GENERATION COMMAND (NEW)
+    // ==================================================================
+    const generateDocsCommand = vscode.commands.registerCommand('cloudcode.generateDocs', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showWarningMessage('No active editor found.');
+            return;
+        }
+        const selection = editor.selection;
+        const selectedText = editor.document.getText(selection);
+        if (!selectedText || selection.isEmpty) {
+            vscode.window.showWarningMessage('Please select a function or code block to document.');
+            return;
+        }
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: "Generating documentation with AI...",
+            cancellable: true
+        }, async (progress, token) => {
+            try {
+                progress.report({ increment: 30, message: "Sending code to backend..." });
+                // Send the selected text to the /generate-docs endpoint
+                const response = await (0, node_fetch_1.default)('http://127.0.0.1:5000/generate-docs', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code: selectedText, language: editor.document.languageId })
+                });
+                if (token.isCancellationRequested) {
+                    return;
+                }
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({ error: 'Failed to parse error response.' }));
+                    throw new Error(errorData.error || `HTTP Error: ${response.status}`);
+                }
+                const data = await response.json();
+                progress.report({ increment: 90, message: "Inserting documentation..." });
+                // Insert the returned documentation above the selected code
+                editor.edit(editBuilder => {
+                    const firstLine = editor.document.lineAt(selection.start.line);
+                    const indentation = firstLine.text.substring(0, firstLine.firstNonWhitespaceCharacterIndex);
+                    // Indent each line of the docstring to match the code's indentation level
+                    const indentedDocs = data.documentation.split('\n').join('\n' + indentation);
+                    editBuilder.insert(selection.start, indentedDocs + '\n' + indentation);
+                });
+                vscode.window.showInformationMessage('AI documentation has been inserted.');
+            }
+            catch (error) {
+                if (token.isCancellationRequested) {
+                    return;
+                }
+                vscode.window.showErrorMessage(`Documentation generation failed: ${error.message}`);
+                console.error(error);
+            }
+        });
+    });
+    // ==================================================================
+    // END: DOCUMENTATION GENERATION COMMAND
+    // ==================================================================
     // COMMAND: Scan for Security Vulnerabilities
     const scanForVulnerabilitiesCommand = vscode.commands.registerCommand('cloudcode.scanForVulnerabilities', async () => {
         const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -291,7 +350,9 @@ function activate(context) {
             }
         });
     });
-    context.subscriptions.push(analyzeProjectCommand, modernizeCodeCommand, scanForVulnerabilitiesCommand);
+    // Add all new and existing commands to the subscriptions
+    context.subscriptions.push(analyzeProjectCommand, modernizeCodeCommand, scanForVulnerabilitiesCommand, generateDocsCommand // <-- Added the new command here
+    );
 }
 // --- HELPER FUNCTIONS FOR 'ANALYZE PROJECT' COMMAND ---
 async function performLocalAnalysis(rootDir) {

@@ -28,6 +28,10 @@
       {
         "command": "cloudcode.scanForVulnerabilities",
         "title": "CloudCode: Scan for Security Vulnerabilities"
+      },
+      {
+        "command": "cloudcode.generateDocs",
+        "title": "CloudCode: Generate Documentation"
       }
     ],
     "menus": {
