@@ -30,7 +30,7 @@
         "title": "CloudCode: Scan for Security Vulnerabilities"
       },
       {
-        "command": "cloudcode.generateDocs",
+        "command": "cloudcode.generateDocumentation",
         "title": "CloudCode: Generate Documentation"
       }
     ],
@@ -39,6 +39,11 @@
         {
           "when": "editorHasSelection",
           "command": "cloudcode.modernizeCode",
+          "group": "1_modification"
+        },
+        {
+          "when": "editorHasSelection",
+          "command": "cloudcode.generateDocumentation", 
           "group": "1_modification"
         }
       ]
