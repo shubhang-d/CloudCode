@@ -109,7 +109,8 @@ function activate(context) {
     console.log('Congratulations, your extension "cloudcode" is now active!');
     const projectAnalysisProvider = new ProjectAnalysisProvider_1.ProjectAnalysisProvider();
     vscode.window.registerTreeDataProvider('cloudcode.projectsView', projectAnalysisProvider);
-    let disposable = vscode.commands.registerCommand('cloudcode.analyzeProject', async () => {
+    // --- ANALYZE PROJECT COMMAND ---
+    const analyzeProjectCommand = vscode.commands.registerCommand('cloudcode.analyzeProject', async () => {
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (!workspaceFolders || workspaceFolders.length === 0) {
             vscode.window.showErrorMessage('Please open a project folder to analyze.');
@@ -150,11 +151,64 @@ function activate(context) {
             }
         });
     });
-    context.subscriptions.push(disposable);
+    // --- MODERNIZE CODE COMMAND (NEW) ---
+    const modernizeCodeCommand = vscode.commands.registerCommand('cloudcode.modernizeCode', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showInformationMessage("No active editor found.");
+            return;
+        }
+        const selection = editor.selection;
+        const selectedText = editor.document.getText(selection);
+        if (!selectedText) {
+            vscode.window.showInformationMessage("Please select a code snippet to modernize.");
+            return;
+        }
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: "Modernizing Code...",
+            cancellable: true
+        }, async (progress, token) => {
+            try {
+                progress.report({ increment: 20, message: "Sending code to backend..." });
+                const response = await (0, node_fetch_1.default)('http://127.0.0.1:5000/refactor/modernize', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        code_snippet: selectedText,
+                        language: editor.document.languageId
+                    })
+                });
+                if (token.isCancellationRequested) {
+                    return;
+                }
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({ error: 'Failed to parse error response from backend.' }));
+                    throw new Error(errorData.error || `HTTP Error: ${response.status}`);
+                }
+                const data = await response.json();
+                const modernizedCode = data.modernizedCode;
+                progress.report({ increment: 80, message: "Applying changes..." });
+                if (modernizedCode) {
+                    editor.edit(editBuilder => {
+                        editBuilder.replace(selection, modernizedCode);
+                    });
+                    vscode.window.showInformationMessage("Code modernized successfully!");
+                }
+                else {
+                    throw new Error("Backend did not return modernized code.");
+                }
+            }
+            catch (error) {
+                vscode.window.showErrorMessage(`Failed to modernize code: ${error.message}`);
+                console.error(error);
+            }
+        });
+    });
+    context.subscriptions.push(analyzeProjectCommand, modernizeCodeCommand);
 }
 async function analyzeLocalFolder(projectRoot, progress) {
     progress.report({ increment: 40, message: "Counting files and lines of code..." });
-    // This now calls our new, reliable, internal function!
     const analysisResult = await performLocalAnalysis(projectRoot);
     progress.report({ increment: 90, message: "Assembling local report..." });
     const summary = analysisResult.SUM;

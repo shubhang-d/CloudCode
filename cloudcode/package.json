@@ -20,8 +20,21 @@
       {
         "command": "cloudcode.analyzeProject",
         "title": "CloudCode: Analyze Current Project"
+      },
+      {
+        "command": "cloudcode.modernizeCode",
+        "title": "CloudCode: Modernize Selection"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "when": "editorHasSelection",
+          "command": "cloudcode.modernizeCode",
+          "group": "1_modification"
+        }
+      ]
+    },
     "viewsContainers": {
       "activitybar": [
         {
